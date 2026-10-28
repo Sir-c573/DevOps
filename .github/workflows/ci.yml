@@ -1,10 +1,18 @@
-name: CI
+name: CI and CD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - stage
+      - "feature/**"
   pull_request:
-    branches: [main]
+    branches:
+      - stage
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   validate:
@@ -21,3 +29,113 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run test:compose
+
+  tag-tested:
+    needs: validate
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/stage' || startsWith(github.ref, 'refs/heads/feature/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Tag tested commit
+        run: |
+          branch_slug="$(printf '%s' "$GITHUB_REF_NAME" | tr '/' '-')"
+          tag="tested-${branch_slug}-${GITHUB_SHA::7}"
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+          if [ -n "$existing_tag" ]; then
+            if [ "$existing_tag" != "$GITHUB_SHA" ]; then
+              echo "Tag $tag already points to a different commit."
+              exit 1
+            fi
+            echo "Tag $tag already points to this tested commit."
+          else
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+          fi
+
+  deploy-production:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
+      ECR_WEB_REPOSITORY: ${{ vars.ECR_WEB_REPOSITORY }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - name: Build and push production images
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --file Dockerfile.api --tag "$ECR_REGISTRY/$ECR_API_REPOSITORY:$IMAGE_TAG" .
+          docker build --file Dockerfile.web --tag "$ECR_REGISTRY/$ECR_WEB_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_API_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_WEB_REPOSITORY:$IMAGE_TAG"
+      - name: Deploy images to EC2 through Systems Manager
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          for value in "$AWS_REGION" "$ECR_API_REPOSITORY" "$ECR_WEB_REPOSITORY" "$EC2_INSTANCE_ID"; do
+            if [ -z "$value" ]; then
+              echo "Missing AWS deployment repository variable."
+              exit 1
+            fi
+          done
+
+          api_image="$ECR_REGISTRY/$ECR_API_REPOSITORY:$IMAGE_TAG"
+          web_image="$ECR_REGISTRY/$ECR_WEB_REPOSITORY:$IMAGE_TAG"
+          printf -v quoted_region '%q' "$AWS_REGION"
+          printf -v quoted_registry '%q' "$ECR_REGISTRY"
+          printf -v quoted_api_image '%q' "$api_image"
+          printf -v quoted_web_image '%q' "$web_image"
+
+          script=$(cat <<EOF
+          set -eu
+          aws ecr get-login-password --region $quoted_region | docker login --username AWS --password-stdin $quoted_registry
+          docker network inspect coffee >/dev/null 2>&1 || docker network create coffee
+          docker volume create coffee-data >/dev/null
+          docker pull $quoted_api_image
+          docker pull $quoted_web_image
+          docker rm --force coffee-web coffee-api >/dev/null 2>&1 || true
+          docker run --detach --name coffee-api --network coffee --network-alias api --restart unless-stopped --volume coffee-data:/app/data --env PORT=3000 --env ORDERS_FILE=/app/data/orders.json $quoted_api_image
+          docker run --detach --name coffee-web --network coffee --publish 8080:80 --restart unless-stopped $quoted_web_image
+
+          for attempt in \$(seq 1 30); do
+            if docker exec coffee-web wget -qO- http://127.0.0.1/api/health | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Deployed containers did not become healthy."
+          exit 1
+          EOF
+          )
+          parameters="$(jq -n --arg command "$script" '{commands: [$command]}')"
+          command_id="$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy Coffee Corner $IMAGE_TAG" \
+            --parameters "$parameters" \
+            --query 'Command.CommandId' \
+            --output text)"
+          aws ssm wait command-executed \
+            --command-id "$command_id" \
+            --instance-id "$EC2_INSTANCE_ID"
