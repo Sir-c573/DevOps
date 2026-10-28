@@ -2,6 +2,8 @@
 
 A small coffee shop app built with React and NestJS, intended for CI/CD and containerization practice. It has no database: the API saves orders to a JSON file.
 
+For an explanation of the branch strategy, CI checks, automatic tags, and AWS deployment, see [DEVOPS.md](./DEVOPS.md).
+
 ## Stack
 
 - React, TypeScript, and Vite frontend
