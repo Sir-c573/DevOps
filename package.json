@@ -1,0 +1,28 @@
+{
+  "name": "coffee-corner",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "overrides": {
+    "multer": "^2.5.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @coffee/api && npm run build --workspace @coffee/web",
+    "test": "npm run build --workspace @coffee/api && node --test apps/api/test/*.test.cjs",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:compose": "node scripts/compose-smoke.cjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^10.0.0",
+    "eslint-config-prettier": "^10.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.0.0",
+    "prettier": "^3.0.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}
