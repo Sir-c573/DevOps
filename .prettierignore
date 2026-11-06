@@ -1,7 +1,14 @@
-node_modules
-**/node_modules
-**/dist
-**/*.tsbuildinfo
-coverage
-package-lock.json
-data/orders.json
+# Terraform state and generated files
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform/**
+
+# Terraform plans
+**/*.tfplan
+
+# Test results
+test-results/
+coverage/
+
+# Deployment temporary files
+deployment/

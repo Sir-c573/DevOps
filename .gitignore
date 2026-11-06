@@ -1,7 +1,33 @@
-node_modules/
-dist/
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Local Terraform configuration
+**/terraform.tfvars
+**/*.auto.tfvars
+
+# Keep example variables committed
+!**/terraform.tfvars.example
+
+# Terraform overrides
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Test results
+test-results/
 coverage/
-*.tsbuildinfo
+
+# Environment secrets
 .env
-.DS_Store
-/data/orders.json
+.env.*
+!.env.example
+
+# Deployment temporary files
+deployment/
