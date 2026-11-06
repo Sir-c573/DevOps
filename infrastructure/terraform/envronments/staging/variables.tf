@@ -31,7 +31,7 @@ variable "instance_type" {
 
 variable "bucket_name" {
   type        = string
-  description = "Globally unique S3 bucket name"
+  description = "Globally unique s3 bucket name"
 }
 
 variable "github_repository" {

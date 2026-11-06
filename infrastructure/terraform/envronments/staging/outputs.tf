@@ -12,7 +12,7 @@ output "staging_url" {
 }
 
 output "results_bucket" {
-  value = module.s3.bucket_name
+  value = module.s3
 }
 
 output "github_actions_role_arn" {

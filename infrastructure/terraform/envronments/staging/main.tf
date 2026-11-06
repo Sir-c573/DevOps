@@ -4,10 +4,10 @@
 module "network" {
   source = "../../modules/network"
 
-  project_name        = var.project_name
-  vpc_cidr            = var.vpc_cidr
-  public_subnet_cidr  = var.public_subnet_cidr
-  availability_zone   = var.availability_zone
+  project_name       = var.project_name
+  vpc_cidr           = var.vpc_cidr
+  public_subnet_cidr = var.public_subnet_cidr
+  availability_zone  = var.availability_zone
 }
 
 
@@ -83,10 +83,10 @@ resource "aws_iam_instance_profile" "staging" {
 module "ec2" {
   source = "../../modules/ec2"
 
-  project_name         = var.project_name
-  instance_type        = var.instance_type
-  subnet_id            = module.network.public_subnet_id
-  security_group_id    = module.network.security_group_id
+  project_name          = var.project_name
+  instance_type         = var.instance_type
+  subnet_id             = module.network.public_subnet_id
+  security_group_id     = module.network.security_group_id
   instance_profile_name = aws_iam_instance_profile.staging.name
 
   depends_on = [
