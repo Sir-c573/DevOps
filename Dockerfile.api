@@ -1,0 +1,26 @@
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+RUN npm ci
+COPY apps/api apps/api
+RUN npm run build --workspace @coffee/api
+
+FROM node:22-alpine AS runtime
+ENV NODE_ENV=production \
+    PORT=3000 \
+    ORDERS_FILE=/app/data/orders.json
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+RUN npm ci --omit=dev --workspace=@coffee/api --include-workspace-root=false && npm cache clean --force
+COPY --from=build /app/apps/api/dist apps/api/dist
+RUN mkdir -p /app/data && chown node:node /app/data
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# Run node directly (not via npm) so SIGTERM from `docker stop` reaches the app.
+CMD ["node", "apps/api/dist/main.js"]

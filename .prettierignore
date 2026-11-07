@@ -1,0 +1,14 @@
+# Terraform state and generated files
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform/**
+
+# Terraform plans
+**/*.tfplan
+
+# Test results
+test-results/
+coverage/
+
+# Deployment temporary files
+deployment/
