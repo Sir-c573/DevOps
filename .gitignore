@@ -35,3 +35,6 @@ deployment/
 # Editor swap files
 *.swp
 *.swo
+
+#node_modules
+node_modules
