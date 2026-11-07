@@ -38,3 +38,8 @@ variable "github_repository" {
   type        = string
   description = "GitHub repository in owner/repository format"
 }
+
+variable "github_oidc_repository" {
+  type        = string
+  description = "Repository as written in the GitHub OIDC sub claim, e.g. owner@ID/repo@ID"
+}

@@ -12,3 +12,4 @@ instance_type      = "t3.micro"
 bucket_name        = "picsart-devops-staging-2026-unique123"
 
 github_repository  = "Sir-c573/DevOps"
+github_oidc_repository = "Sir-c573@192271267/DevOps@1432981893"
