@@ -1,9 +1,12 @@
+#Staging CI/CD workflow is a complete automated deployment pipeline.
+#It takes code from stage branch, tests it, builds Docker images, 
+#pushes them to Amazon ECR, and deploys them to your staging EC2 instanc
 name: Staging CI/CD
 
 on:
   push:
     branches:
-      - stage
+      - stage-backend
 
   workflow_dispatch:
 

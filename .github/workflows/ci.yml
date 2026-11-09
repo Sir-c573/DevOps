@@ -4,12 +4,12 @@ on:
   push:
     branches:
       - "feature/**"
-      - stage
+      - stage-backend
       - main
   pull_request:
     branches:
       - main
-      - stage
+      - stage-backend
 
 permissions:
   contents: read
