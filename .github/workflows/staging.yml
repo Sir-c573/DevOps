@@ -1,0 +1,262 @@
+#Staging CI/CD workflow is a complete automated deployment pipeline.
+#It takes code from stage branch, tests it, builds Docker images, 
+#pushes them to Amazon ECR, and deploys them to your staging EC2 instanc
+name: Staging CI/CD
+
+on:
+  push:
+    branches:
+      - stage-backend
+
+  workflow_dispatch:
+
+# Least privilege: the workflow can read the repo and request an OIDC token.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  RESULTS_BUCKET: ${{ vars.STAGING_RESULTS_BUCKET }}
+
+  # ECR repository NAMES (not URLs). The registry host is resolved at runtime.
+  ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
+  ECR_WEB_REPOSITORY: ${{ vars.ECR_WEB_REPOSITORY }}
+
+  STAGING_INSTANCE_ID: ${{ vars.STAGING_INSTANCE_ID }}
+  STAGING_PUBLIC_IP: ${{ vars.STAGING_PUBLIC_IP }}
+
+jobs:
+  # TEST APPLICATION
+  test:
+    name: Test application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Debug OIDC claims
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "$TOKEN" | python3 -c "import sys,json,base64; p=sys.stdin.read().strip().split('.')[1]; p+='='*(-len(p)%4); d=json.loads(base64.urlsafe_b64decode(p)); print({k:d.get(k) for k in ('sub','aud','ref','repository')})"
+
+      - name: Configure AWS credentials
+        id: aws-auth
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          npm test 2>&1 | tee test-results/test.log
+
+      - name: Save test results to S3
+        if: ${{ always() && steps.aws-auth.outcome == 'success' }}
+        run: |
+          mkdir -p test-results
+
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Test outcome: ${{ steps.tests.outcome }}"
+          } > test-results/build-info.txt
+
+          aws s3 cp test-results/ \
+            "s3://${RESULTS_BUCKET}/staging/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/" \
+            --recursive
+
+      - name: Fail pipeline if tests failed
+        if: ${{ steps.tests.outcome != 'success' }}
+        run: exit 1
+
+  # BUILD AND PUSH DOCKER IMAGES TO AMAZON ECR
+  build:
+    name: Build and push images to ECR
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      registry: ${{ steps.ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_API_REPOSITORY }}:${{ github.sha }}
+
+      - name: Build and push Web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_WEB_REPOSITORY }}:${{ github.sha }}
+
+  # DEPLOY TO STAGING EC2
+  deploy:
+    name: Deploy to AWS staging
+    needs: build
+    runs-on: ubuntu-latest
+
+    env:
+      REGISTRY: ${{ needs.build.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prepare deployment files
+        run: |
+          mkdir -p deployment
+
+          cp deploy/docker-compose.staging.yml deployment/
+
+          {
+            echo "API_IMAGE=${REGISTRY}/${ECR_API_REPOSITORY}:${GITHUB_SHA}"
+            echo "WEB_IMAGE=${REGISTRY}/${ECR_WEB_REPOSITORY}:${GITHUB_SHA}"
+          } > deployment/.env
+
+      - name: Upload deployment configuration
+        run: |
+          aws s3 cp deployment/ \
+            "s3://${RESULTS_BUCKET}/deploy/staging/" \
+            --recursive
+
+      - name: Deploy using AWS Systems Manager
+        env:
+          BUCKET: ${{ env.RESULTS_BUCKET }}
+          INSTANCE: ${{ env.STAGING_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          # Variables below are expanded here (unquoted EOF), so the instance
+          # receives a finished script.
+          DEPLOY_COMMAND=$(cat <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          export HOME=/root
+          export AWS_DEFAULT_REGION=${AWS_REGION}
+
+          mkdir -p /opt/devops-staging
+          cd /opt/devops-staging
+
+          aws s3 cp s3://${BUCKET}/deploy/staging/docker-compose.staging.yml .
+          aws s3 cp s3://${BUCKET}/deploy/staging/.env .
+
+          aws ecr get-login-password --region ${AWS_REGION} \
+            | docker login --username AWS --password-stdin ${REGISTRY}
+
+          docker compose --env-file .env \
+            -f docker-compose.staging.yml pull
+
+          docker compose --env-file .env \
+            -f docker-compose.staging.yml up -d --remove-orphans
+
+          docker image prune -f
+          EOF
+          )
+
+          jq -n \
+            --arg instance "$INSTANCE" \
+            --arg command "$DEPLOY_COMMAND" \
+            '{
+              InstanceIds: [$instance],
+              DocumentName: "AWS-RunShellScript",
+              Parameters: {
+                commands: [$command]
+              }
+            }' > "$RUNNER_TEMP/ssm-command.json"
+
+          COMMAND_ID=$(aws ssm send-command \
+            --cli-input-json "file://$RUNNER_TEMP/ssm-command.json" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Deployment command: $COMMAND_ID"
+
+          # `aws ssm wait` gives up after ~100s, which is too short for image
+          # pulls, so poll the command status ourselves (up to 10 minutes).
+          STATUS=Pending
+          for attempt in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE" \
+              --query Status --output text 2>/dev/null || echo Pending)
+
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 10
+          done
+
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE" \
+            --query "{Stdout:StandardOutputContent,Stderr:StandardErrorContent}" \
+            --output text || true
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Deployment finished with status: $STATUS"
+            exit 1
+          fi
+
+      - name: Verify staging application
+        run: |
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent "http://${STAGING_PUBLIC_IP}/" > /dev/null \
+              && curl --fail --silent "http://${STAGING_PUBLIC_IP}/api/health" | grep -q '"status":"ok"'; then
+              echo "Staging application is responding."
+              exit 0
+            fi
+
+            echo "Waiting for staging application..."
+            sleep 10
+          done
+
+          echo "Staging health check failed."
+          exit 1
