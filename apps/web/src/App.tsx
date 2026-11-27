@@ -7,6 +7,11 @@ type Drink = {
   price: number;
 };
 
+type Notice = {
+  kind: "success" | "error";
+  text: string;
+};
+
 const icons: Record<string, string> = {
   espresso: "☕",
   latte: "🥛",
@@ -19,7 +24,7 @@ export default function App() {
   const [loadingMenu, setLoadingMenu] = useState(true);
   const [menuError, setMenuError] = useState("");
   const [ordering, setOrdering] = useState<string | null>(null);
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<Notice | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -44,7 +49,7 @@ export default function App() {
 
   async function orderDrink(drink: Drink) {
     setOrdering(drink.id);
-    setNotice("");
+    setNotice(null);
     try {
       const response = await fetch("/api/orders", {
         method: "POST",
@@ -57,11 +62,15 @@ export default function App() {
       };
       if (!response.ok)
         throw new Error(result.message ?? "Could not place your order.");
-      setNotice(result.message ?? "Order placed!");
+      setNotice({ kind: "success", text: result.message ?? "Order placed!" });
     } catch (error) {
-      setNotice(
-        error instanceof Error ? error.message : "Could not place your order.",
-      );
+      setNotice({
+        kind: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Could not place your order.",
+      });
     } finally {
       setOrdering(null);
     }
@@ -129,8 +138,11 @@ export default function App() {
           </p>
         )}
         {notice && (
-          <p className="feedback success" role="status">
-            {notice}
+          <p
+            className={`feedback ${notice.kind}`}
+            role={notice.kind === "error" ? "alert" : "status"}
+          >
+            {notice.text}
           </p>
         )}
 
@@ -140,7 +152,9 @@ export default function App() {
               <article className="drink-card" key={drink.id}>
                 <div className={`drink-art drink-art-${index % 4}`}>
                   <span>{icons[drink.id] ?? "☕"}</span>
-                  <span className="drink-number">0{index + 1}</span>
+                  <span className="drink-number">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
                 </div>
                 <div className="drink-info">
                   <div className="drink-title">
