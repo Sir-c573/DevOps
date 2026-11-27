@@ -1,0 +1,211 @@
+# Staging CI/CD: runs the full CI checks on the stage-backend branch, then
+# tests, builds Docker images, pushes them to Amazon ECR, and deploys them to
+# the staging EC2 server. No S3 is used: deployment files and test results are
+# sent straight to the server through AWS SSM (scripts/ssm-run.sh) and stored
+# on its data volume (deploy/server.sh).
+name: Staging CI/CD
+
+on:
+  push:
+    branches:
+      - stage-backend
+
+  workflow_dispatch:
+
+# Least privilege: the workflow can read the repo and request an OIDC token.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+  # ECR repository NAMES (not URLs). The registry host is resolved at runtime.
+  ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
+  ECR_WEB_REPOSITORY: ${{ vars.ECR_WEB_REPOSITORY }}
+
+  STAGING_INSTANCE_ID: ${{ vars.STAGING_INSTANCE_ID }}
+  STAGING_PUBLIC_IP: ${{ vars.STAGING_PUBLIC_IP }}
+
+jobs:
+  # FULL CI CHECKS (lint, format, audit, tests, build, compose smoke, terraform)
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  # TEST APPLICATION
+  test:
+    name: Test application
+    needs: ci
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Configure AWS credentials
+        id: aws-auth
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          npm test 2>&1 | tee test-results/test.log
+
+      - name: Collect test results
+        if: ${{ always() }}
+        run: |
+          mkdir -p test-results
+
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Test outcome: ${{ steps.tests.outcome }}"
+          } > test-results/build-info.txt
+
+          # SSM commands have a size limit; keep only the end of a huge log.
+          if [ -f test-results/test.log ] && [ "$(wc -c < test-results/test.log)" -gt 200000 ]; then
+            tail -n 2000 test-results/test.log > test-results/test.log.tail
+            mv test-results/test.log.tail test-results/test.log
+          fi
+
+      - name: Upload test results as a workflow artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          retention-days: 14
+
+      - name: Store test results on the staging server
+        if: ${{ always() && steps.aws-auth.outcome == 'success' }}
+        env:
+          SSM_COMMENT: "Store test results ${{ github.run_id }}"
+          SSM_TIMEOUT: "120"
+        run: |
+          cp deploy/server.sh test-results/
+          scripts/ssm-run.sh "$STAGING_INSTANCE_ID" test-results \
+            bash server.sh store-results "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" .
+
+      - name: Fail pipeline if tests failed
+        if: ${{ steps.tests.outcome != 'success' }}
+        run: exit 1
+
+  # BUILD AND PUSH DOCKER IMAGES TO AMAZON ECR
+  build:
+    name: Build and push images to ECR
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      registry: ${{ steps.ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_API_REPOSITORY }}:${{ github.sha }}
+
+      - name: Build and push Web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_WEB_REPOSITORY }}:${{ github.sha }}
+
+  # DEPLOY TO STAGING EC2
+  deploy:
+    name: Deploy to AWS staging
+    needs: build
+    runs-on: ubuntu-latest
+
+    env:
+      REGISTRY: ${{ needs.build.outputs.registry }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prepare deployment bundle
+        run: |
+          mkdir -p deployment
+
+          cp deploy/docker-compose.staging.yml deployment/docker-compose.yml
+          cp deploy/server.sh deployment/
+
+          {
+            echo "REGISTRY=${REGISTRY}"
+            echo "AWS_REGION=${AWS_REGION}"
+            echo "API_IMAGE=${REGISTRY}/${ECR_API_REPOSITORY}:${GITHUB_SHA}"
+            echo "WEB_IMAGE=${REGISTRY}/${ECR_WEB_REPOSITORY}:${GITHUB_SHA}"
+          } > deployment/.env
+
+      - name: Deploy to the staging server through SSM
+        env:
+          SSM_COMMENT: "Deploy ${{ github.sha }}"
+          SSM_TIMEOUT: "900"
+        run: |
+          scripts/ssm-run.sh "$STAGING_INSTANCE_ID" deployment \
+            bash server.sh deploy "$GITHUB_SHA" .
+
+      - name: Verify staging application
+        run: |
+          for _ in $(seq 1 12); do
+            if curl --fail --silent "http://${STAGING_PUBLIC_IP}/" > /dev/null \
+              && curl --fail --silent "http://${STAGING_PUBLIC_IP}/api/health" | grep -q '"status":"ok"'; then
+              echo "Staging application is responding."
+              exit 0
+            fi
+
+            echo "Waiting for staging application..."
+            sleep 10
+          done
+
+          echo "Staging health check failed."
+          exit 1

@@ -48,11 +48,11 @@ Production deployments should include appropriate approval controls.
 
 Provide isolated environments for development and testing.
 
-| Environment | Purpose |
-|---|---|
-| Local Docker | Local development and debugging |
-| Team Staging | Independent testing environment for each team |
-| Live / Production | Stable application available to users |
+| Environment       | Purpose                                       |
+| ----------------- | --------------------------------------------- |
+| Local Docker      | Local development and debugging               |
+| Team Staging      | Independent testing environment for each team |
+| Live / Production | Stable application available to users         |
 
 Each staging environment should allow teams to validate changes without interfering with other teams or production.
 
@@ -176,7 +176,7 @@ The final technology stack will depend on the project's implementation.
 - **Load Testing:** k6 or Apache JMeter
 - **Security:** SAST, dependency, container, and IaC scanners
 
-*These are proposed technologies, not a claim that every tool has already been implemented.*
+_These are proposed technologies, not a claim that every tool has already been implemented._
 
 ## ✅ Project Deliverables
 

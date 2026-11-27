@@ -1,0 +1,79 @@
+# Staging stack, run on the staging EC2 server by deploy/server.sh.
+# Image references come from the release's .env (written by CI):
+#   API_IMAGE, WEB_IMAGE, REGISTRY, AWS_REGION
+name: coffee-staging
+
+x-logging: &logging # Rotate container logs so they can't fill the disk.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  api:
+    image: ${API_IMAGE:?API_IMAGE is required}
+    container_name: staging-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      ORDERS_FILE: /app/data/orders.json
+    expose:
+      - "3000"
+    volumes:
+      # On the server's EBS data volume, so orders survive container and
+      # instance replacement.
+      - ${APP_DATA_DIR:-/opt/devops-staging/data}:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    logging: *logging
+    networks:
+      - staging-network
+
+  web:
+    image: ${WEB_IMAGE:?WEB_IMAGE is required}
+    container_name: staging-web
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:8080/",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging: *logging
+    networks:
+      - staging-network
+
+networks:
+  staging-network:
+    driver: bridge
