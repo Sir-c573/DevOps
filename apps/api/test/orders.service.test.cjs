@@ -3,7 +3,15 @@ const { mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
-const { AppService, menu } = require("../dist/app.service");
+const { menu } = require("../dist/menu/menu.data");
+const { MenuService } = require("../dist/menu/menu.service");
+const { OrdersRepository } = require("../dist/orders/orders.repository");
+const { OrdersService } = require("../dist/orders/orders.service");
+
+// Builds the service the same way Nest's dependency injection would.
+function createOrdersService() {
+  return new OrdersService(new MenuService(), new OrdersRepository());
+}
 
 async function withTemporaryService(run) {
   const directory = await mkdtemp(join(tmpdir(), "coffee-service-"));
@@ -12,7 +20,7 @@ async function withTemporaryService(run) {
   process.env.ORDERS_FILE = ordersFile;
 
   try {
-    const service = new AppService();
+    const service = createOrdersService();
     await service.onModuleInit();
     await run(service, ordersFile);
   } finally {
@@ -25,11 +33,12 @@ async function withTemporaryService(run) {
   }
 }
 
-test("returns the coffee menu", async () => {
-  await withTemporaryService((service) => {
-    assert.deepEqual(service.getMenu(), menu);
-    assert.ok(service.getMenu().length > 0);
-  });
+test("returns the coffee menu", () => {
+  const menuService = new MenuService();
+  assert.deepEqual(menuService.findAll(), menu);
+  assert.ok(menuService.findAll().length > 0);
+  assert.equal(menuService.findById("espresso"), menu[0]);
+  assert.equal(menuService.findById("tea"), undefined);
 });
 
 test("creates and persists an order for a menu item", async () => {
@@ -50,7 +59,7 @@ test("creates and persists an order for a menu item", async () => {
     assert.equal(storedOrders.length, 3);
     assert.equal(storedOrders[0].item.id, "espresso");
 
-    const restartedService = new AppService();
+    const restartedService = createOrdersService();
     await restartedService.onModuleInit();
     assert.equal((await restartedService.createOrder("cappuccino")).id, 4);
   });
@@ -79,7 +88,7 @@ test("starts with orders saved under an older menu", async () => {
       ]),
     );
 
-    const service = new AppService();
+    const service = createOrdersService();
     await service.onModuleInit();
     assert.equal((await service.createOrder("espresso")).id, 2);
   } finally {
