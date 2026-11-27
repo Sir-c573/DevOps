@@ -1,7 +1,7 @@
 
 variable "bucket_name" {
   type        = string
-  description = "Globally unique s3 bucket name"
+  description = "Globally unique S3 bucket name for static files"
 }
 
 variable "environment" {

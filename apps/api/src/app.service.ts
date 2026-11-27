@@ -29,11 +29,17 @@ export const menu = [
   },
 ] as const;
 
-type Drink = (typeof menu)[number];
+// A snapshot of the drink at order time; it may differ from the current menu.
+type OrderedDrink = {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+};
 
 type CoffeeOrder = {
   id: number;
-  item: Drink;
+  item: OrderedDrink;
   message: string;
 };
 
@@ -112,20 +118,22 @@ export class AppService implements OnModuleInit {
   }
 }
 
+// Checks the shape of a stored order only. Saved orders are a historical record,
+// so they must stay valid after the menu changes (a new price, a renamed or
+// removed drink); otherwise the API would refuse to start on existing data.
 function isCoffeeOrder(value: unknown): value is CoffeeOrder {
   if (!value || typeof value !== "object") return false;
   const order = value as Record<string, unknown>;
-  const itemData = order.item;
-  if (!itemData || typeof itemData !== "object") return false;
-  const itemId = (itemData as { id?: unknown }).id;
-  const item = menu.find((drink) => drink.id === itemId);
+  const item = order.item as Record<string, unknown> | null | undefined;
+  if (!item || typeof item !== "object") return false;
 
   return (
     Number.isSafeInteger(order.id) &&
     Number(order.id) > 0 &&
-    !!item &&
-    JSON.stringify(itemData) === JSON.stringify(item) &&
-    order.message === `Your ${item.name} is on its way!`
+    typeof item.id === "string" &&
+    typeof item.name === "string" &&
+    typeof item.price === "number" &&
+    typeof order.message === "string"
   );
 }
 

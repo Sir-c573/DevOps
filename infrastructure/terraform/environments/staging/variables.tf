@@ -31,7 +31,7 @@ variable "instance_type" {
 
 variable "bucket_name" {
   type        = string
-  description = "Globally unique s3 bucket name"
+  description = "Globally unique S3 bucket name for static files"
 }
 
 variable "github_repository" {
@@ -42,4 +42,9 @@ variable "github_repository" {
 variable "github_oidc_repository" {
   type        = string
   description = "Repository as written in the GitHub OIDC sub claim, e.g. owner@ID/repo@ID"
+}
+variable "data_volume_size" {
+  type        = number
+  description = "Size in GiB of the staging data volume (releases, data, test results)"
+  default     = 10
 }

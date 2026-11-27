@@ -4,12 +4,14 @@ on:
   push:
     branches:
       - "feature/**"
-      - stage-backend
       - main
+  # stage-backend pushes run this workflow through staging.yml (workflow_call),
+  # so a failing check blocks the staging deploy and CI doesn't run twice.
   pull_request:
     branches:
       - main
       - stage-backend
+  workflow_call:
 
 permissions:
   contents: read
@@ -41,6 +43,15 @@ jobs:
 
       - name: Check formatting
         run: npm run format:check
+
+      - name: Lint shell scripts
+        # shellcheck is preinstalled on GitHub's Ubuntu runners.
+        run: shellcheck deploy/*.sh scripts/*.sh
+
+      - name: Validate staging Compose file
+        run: |
+          API_IMAGE=example/api WEB_IMAGE=example/web \
+            docker compose -f deploy/docker-compose.staging.yml config --quiet
 
       - name: Dependency vulnerability scan (production dependencies)
         run: npm audit --omit=dev --audit-level=high

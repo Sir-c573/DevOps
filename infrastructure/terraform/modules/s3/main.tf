@@ -1,11 +1,15 @@
 
+# Bucket for static files only (assets, uploads, etc.).
+# Docker images live in ECR and on the server; test results and deployment
+# files live on the server. Nothing in CI/CD writes to this bucket.
+
 resource "aws_s3_bucket" "results" {
   bucket = var.bucket_name
 
   tags = {
     Name        = var.bucket_name
     Environment = var.environment
-    Purpose     = "CI test results"
+    Purpose     = "Static files"
   }
 }
 
@@ -40,15 +44,12 @@ resource "aws_s3_bucket_lifecycle_configuration" "results" {
   bucket = aws_s3_bucket.results.id
 
   rule {
-    id     = "expire-old-reports"
+    id     = "expire-old-versions"
     status = "Enabled"
 
+    # Whole bucket.
     filter {
-      prefix = "staging/"
-    }
-
-    expiration {
-      days = 365
+      prefix = ""
     }
 
     noncurrent_version_expiration {

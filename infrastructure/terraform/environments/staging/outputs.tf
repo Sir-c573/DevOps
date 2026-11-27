@@ -11,8 +11,12 @@ output "staging_url" {
   value = "http://${module.ec2.public_ip}"
 }
 
-output "results_bucket" {
+output "static_files_bucket" {
   value = module.s3.bucket_name
+}
+
+output "staging_app_dir" {
+  value = module.ec2.app_dir
 }
 
 output "github_actions_role_arn" {
