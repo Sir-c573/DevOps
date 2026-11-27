@@ -8,3 +8,14 @@ coverage
 .env
 .DS_Store
 data/orders.json
+
+# Not needed inside the images; keeps the build context small and avoids
+# rebuilding layers when only infra/docs change.
+infrastructure
+**/.terraform
+deploy
+scripts
+test-results
+*.md
+docker-compose*.yml
+Dockerfile.*

@@ -18,7 +18,7 @@ module "network" {
 }
 
 
-# S3 MODULE
+# S3 MODULE (static files only; CI/CD does not use it)
 
 module "s3" {
   source = "../../modules/s3"
@@ -68,29 +68,6 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# Allows EC2 to download deployment configuration
-# from the deployment folder in S3.
-
-resource "aws_iam_role_policy" "ec2_s3" {
-  name = "${var.project_name}-staging-s3-read"
-
-  role = aws_iam_role.ec2_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [{
-      Effect = "Allow"
-
-      Action = [
-        "s3:GetObject"
-      ]
-
-      Resource = "${module.s3.bucket_arn}/deploy/*"
-    }]
-  })
-}
-
 # Allows EC2 to pull images from ECR (read-only).
 
 resource "aws_iam_role_policy_attachment" "ecr_read" {
@@ -114,14 +91,17 @@ module "ec2" {
   project_name          = var.project_name
   environment           = local.environment
   instance_type         = var.instance_type
+  availability_zone     = var.availability_zone
+  data_volume_size      = var.data_volume_size
   subnet_id             = module.network.public_subnet_id
   security_group_id     = module.network.security_group_id
   instance_profile_name = aws_iam_instance_profile.staging.name
 
+  # The Elastic IP needs the internet gateway to exist first.
   depends_on = [
+    module.network,
     aws_iam_role_policy_attachment.ssm,
     aws_iam_role_policy_attachment.ecr_read,
-    aws_iam_role_policy.ec2_s3
   ]
 }
 
@@ -184,19 +164,7 @@ resource "aws_iam_role_policy" "github_actions" {
 
     Statement = [
       {
-        Effect = "Allow"
-
-        Action = [
-          "s3:PutObject"
-        ]
-
-        Resource = [
-          "${module.s3.bucket_arn}/staging/*",
-          "${module.s3.bucket_arn}/deploy/*"
-        ]
-      },
-      {
-        # Run the deploy script on the staging instance only,
+        # Deploy and store test results on the staging instance only,
         # and only using the AWS-RunShellScript document.
         Effect = "Allow"
 
