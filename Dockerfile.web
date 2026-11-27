@@ -3,7 +3,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm ci
+# Install only the web workspace's dependencies (not the API's or the root
+# lint tooling); the other package.json files are needed to match the lockfile.
+RUN npm ci --workspace @coffee/web --include-workspace-root=false
 COPY apps/web apps/web
 RUN npm run build --workspace @coffee/web
 

@@ -21,7 +21,7 @@ NestJS API (api container, port 3000)
 ```
 
 1. `index.html` loads `src/main.tsx`, which mounts the `<App />` component into `#root`.
-2. On load, `App.tsx` calls `GET /api/menu` and renders one card per drink. While waiting it shows "Brewing up the menu…"; if the request fails it shows an error message.
+2. On load, `MenuSection` (through the `useMenu` hook) calls `GET /api/menu` and renders one `DrinkCard` per drink. While waiting it shows "Brewing up the menu…"; if the request fails it shows an error with a **Try again** button, and an empty menu shows "The menu is empty right now."
 3. Clicking **Order this** sends `POST /api/orders` with the drink's `itemId`. The API's message ("Order placed!" or an error) is shown above the menu. While an order is in flight, all order buttons are disabled.
 4. The frontend always calls the API with a **relative path** (`/api/...`). It never needs to know the API's address: in development Vite forwards `/api` to the API, and in Docker Nginx does.
 
@@ -36,9 +36,22 @@ apps/web/
 ├── vite.config.ts    # React plugin + /api dev proxy to localhost:3000
 └── src/
     ├── main.tsx      # Mounts <App /> in React StrictMode
-    ├── App.tsx       # The whole page: header, hero, menu, ordering, footer
+    ├── App.tsx       # Page layout: Header, Hero, MenuSection, Footer
+    ├── api.ts        # fetchMenu() and placeOrder(): all calls to the API
+    ├── types.ts      # Shared types (Drink, Notice)
+    ├── hooks/
+    │   ├── useMenu.ts    # Loads the menu; loading/error state and reload()
+    │   └── useOrder.ts   # Places an order; tracks in-flight order and notice
+    ├── components/
+    │   ├── Header.tsx
+    │   ├── Hero.tsx
+    │   ├── MenuSection.tsx  # Feedback messages, retry, empty state, grid
+    │   ├── DrinkCard.tsx    # One drink: icon, number, price, order button
+    │   └── Footer.tsx
     └── styles.css    # All styling
 ```
+
+Rule of thumb: components only render, hooks hold state, and `api.ts` is the only file that calls `fetch`.
 
 The repository is an **npm workspace** (`apps/api` and `apps/web`), so dependencies are installed once from the repository root with a single `package-lock.json`.
 
