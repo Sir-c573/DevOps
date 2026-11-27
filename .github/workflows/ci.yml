@@ -5,12 +5,14 @@ on:
     branches:
       - "feature/**"
       - main
+      - stage-frontend
   # stage-backend pushes run this workflow through staging.yml (workflow_call),
   # so a failing check blocks the staging deploy and CI doesn't run twice.
   pull_request:
     branches:
       - main
       - stage-backend
+      - stage-frontend
   workflow_call:
 
 permissions:
