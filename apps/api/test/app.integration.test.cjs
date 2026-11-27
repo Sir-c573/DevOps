@@ -63,6 +63,15 @@ test("serves health, menu, and order endpoints and keeps orders after restart", 
   });
   assert.equal(invalidOrderResponse.status, 404);
 
+  for (const body of [{}, { itemId: "" }, { itemId: 42 }]) {
+    const badRequestResponse = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(badRequestResponse.status, 400);
+  }
+
   const storedOrders = JSON.parse(
     await readFile(process.env.ORDERS_FILE, "utf8"),
   );
