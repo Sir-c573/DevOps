@@ -1,13 +1,18 @@
 # DevOps workflow
 
-This document explains how Coffee Corner is tested, promoted, tagged, and deployed. The automation is defined in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
+This document explains how Coffee Corner is tested and deployed to staging. The automation is defined in two workflows:
+
+- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml): the CI checks (`validate` job).
+- [`.github/workflows/staging.yml`](./.github/workflows/staging.yml): staging CI/CD. It runs `ci.yml` first, then tests, builds, pushes, and deploys.
+
+Infrastructure is defined with Terraform in [`infrastructure/terraform`](./infrastructure/terraform).
 
 ## Application and deployment architecture
 
 ```text
 Browser
   |
-  | HTTP :8080
+  | HTTP :80 (host) -> :8080 (container)
   v
 EC2: Nginx frontend container
   |
@@ -20,41 +25,18 @@ EC2: NestJS API container
 Docker volume: coffee-data
 ```
 
-GitHub Actions builds separate frontend and API Docker images. Amazon ECR stores the images, and AWS Systems Manager (SSM) runs deployment commands on the EC2 instance. GitHub authenticates to AWS through OIDC; the workflow does not use long-lived AWS access keys.
+GitHub Actions builds separate frontend and API Docker images. Amazon ECR stores the images, and AWS Systems Manager (SSM) runs deployment commands on the EC2 instance. GitHub authenticates to AWS through OIDC, so the workflows don't use long-lived AWS access keys.
 
-## Branch and promotion flow
+## Branches
 
-```text
-latest stage
-    |
-    +-- feature/frontend-... or feature/backend-...
-                |
-                | CI passes; tested tag is added
-                v
-          pull request to stage
-                |
-                | combined application tests pass
-                v
-              stage
-                |
-                | staging sign-off; pull request to main
-                v
-              main
-                |
-                | CI passes, then CD deploys
-                v
-             EC2 live
-```
+| Branch                           | What runs                                                          |
+| -------------------------------- | ------------------------------------------------------------------ |
+| `feature/**`                     | CI (`ci.yml`) on push                                              |
+| `stage-backend`                  | Staging CI/CD (`staging.yml`): full CI, then deploy to staging EC2 |
+| `main`                           | CI on push                                                         |
+| PRs to `main` or `stage-backend` | CI                                                                 |
 
-Create each feature branch from the latest `stage` branch:
-
-```sh
-git switch stage
-git pull origin stage
-git switch -c feature/frontend-menu
-```
-
-After making changes, run checks locally and push the feature branch:
+Before pushing, run the same checks locally (Node.js 22 is required):
 
 ```sh
 npm run lint
@@ -62,79 +44,83 @@ npm run format:check
 npm test
 npm run build
 npm run test:compose
-git push --set-upstream origin feature/frontend-menu
 ```
-
-Open a pull request from the feature branch into `stage`. Merge after the required checks pass. Test the combined application on `stage`, then open a pull request from `stage` into `main`. Merging to `main` is the production release action.
-
-Frontend and backend changes both run the same full test suite. In particular, API endpoint tests and the Docker Compose smoke test cover frontend-to-backend routing and order persistence, so backend changes receive regression coverage for the whole demo app.
 
 ## What CI checks
 
-The `validate` job runs for:
-
-- Pushes to `feature/**`, `stage`, and `main`
-- Pull requests targeting `stage` or `main`
-
-It performs these checks in order:
+The `validate` job in `ci.yml` runs, in order:
 
 1. Installs the locked npm dependencies with `npm ci`.
 2. Runs ESLint and checks Prettier formatting.
-3. Runs API unit and HTTP integration tests.
-4. Builds both the NestJS API and React frontend.
-5. Builds and starts the Docker Compose app, checks its frontend and API, places orders, restarts the API, and checks that orders persist.
-6. Removes the temporary smoke-test containers, network, and volume.
+3. Runs `npm audit` for high or critical vulnerabilities in production dependencies.
+4. Runs API unit and HTTP integration tests.
+5. Builds both the NestJS API and React frontend.
+6. Builds and starts the Docker Compose app, checks the frontend and API, places orders, restarts the API, and checks that orders persist. It then removes the temporary containers, network, and volume.
+7. Checks Terraform formatting and runs `terraform validate` for the staging environment.
 
-The full regression suite runs for frontend and backend changes alike.
+## Staging CI/CD on `stage-backend`
 
-## Tested commit tags
+`staging.yml` runs on every push to `stage-backend`, and you can also start it manually (`workflow_dispatch`). Only one staging deployment runs at a time. The jobs are:
 
-After `validate` succeeds on a push to a feature branch or `stage`, the `tag-tested` job adds an immutable tag to that exact commit:
+1. **`ci`**: calls `ci.yml`. If any check fails, nothing is deployed.
+2. **`test`**: authenticates to AWS through OIDC, runs `npm test`, and uploads the test log and build info to `s3://<results bucket>/staging/<run id>-<attempt>/`.
+3. **`build`**: builds the API and web images and pushes them to ECR, tagged with the full commit SHA. The tags are immutable.
+4. **`deploy`**:
+   - Uploads `deploy/docker-compose.staging.yml` and a generated `.env` (holding the image references) to `s3://<results bucket>/deploy/staging/`.
+   - Sends an SSM `AWS-RunShellScript` command to the staging instance. The command downloads both files, logs in to ECR, runs `docker compose pull` and `up -d`, and prunes old images.
+   - Polls the SSM command for up to 10 minutes.
+   - Checks `http://<staging IP>/` and `http://<staging IP>/api/health`.
 
-```text
-tested-feature-frontend-menu-<short-sha>
-tested-stage-<short-sha>
+The API stores orders in the `coffee-data` Docker volume on EC2. Recreating the API container preserves that volume; removing the volume deletes the orders.
+
+### GitHub settings required
+
+In the repository's **Settings → Secrets and variables → Actions**, configure:
+
+| Name                     | Type     | Purpose                                                            |
+| ------------------------ | -------- | ------------------------------------------------------------------ |
+| `AWS_ROLE_ARN`           | Secret   | OIDC-trusted IAM role (Terraform output `github_actions_role_arn`) |
+| `AWS_REGION`             | Variable | Region containing ECR, S3, and EC2                                 |
+| `STAGING_RESULTS_BUCKET` | Variable | S3 bucket for test results and deploy files (`results_bucket`)     |
+| `ECR_API_REPOSITORY`     | Variable | ECR repository name for the API (`<project_name>-api`)             |
+| `ECR_WEB_REPOSITORY`     | Variable | ECR repository name for the web app (`<project_name>-web`)         |
+| `STAGING_INSTANCE_ID`    | Variable | Staging EC2 instance ID (`staging_instance_id`)                    |
+| `STAGING_PUBLIC_IP`      | Variable | Staging EC2 public IP (`staging_public_ip`)                        |
+
+## Infrastructure (Terraform)
+
+`infrastructure/terraform/environments/staging` creates:
+
+- A VPC, a public subnet, an internet gateway, and a security group that allows inbound HTTP on port 80.
+- The S3 results bucket: versioned, encrypted, public access blocked, with `staging/` reports expiring after 365 days.
+- ECR repositories for the API and web images: immutable tags, scan on push, keeping the last 30 images.
+- The staging EC2 instance: Ubuntu 24.04 with Docker, Docker Compose, and AWS CLI v2. IMDSv2 is required and the root volume is encrypted.
+- An instance role allowing SSM management, ECR pulls, and reads from `deploy/*` in the bucket.
+- The GitHub OIDC provider, and a GitHub Actions role with a narrow set of permissions:
+  - Write to `staging/*` and `deploy/*` in the bucket.
+  - Run `AWS-RunShellScript` on the staging instance only.
+  - Push images to the project's ECR repositories only.
+
+The role's trust policy only accepts tokens from the `stage-backend` branch. The repository uses GitHub's ID-based OIDC subject format (`repo:owner@ID/repo@ID:ref:refs/heads/stage-backend`), which is set with `github_oidc_repository`.
+
+To apply:
+
+```sh
+cd infrastructure/terraform/environments/staging
+cp terraform.tfvars.example terraform.tfvars   # then edit
+terraform init
+terraform apply
 ```
 
-Tags label commits; they do not merge branches or promote code. Pull-request runs do not create tags. Production Docker images use the full commit SHA as their image tag.
+## Protecting the branches
 
-## Production CD on `main`
-
-The `deploy-production` job runs only after `validate` succeeds for a push to `main`. It:
-
-1. Authenticates to AWS through GitHub OIDC.
-2. Builds the API and frontend Docker images.
-3. Pushes both immutable, commit-SHA-tagged images to Amazon ECR.
-4. Sends a deployment command to the configured EC2 instance through SSM.
-5. Pulls the new images, recreates the containers, and checks the API health endpoint through Nginx.
-
-The API stores orders in the `coffee-data` Docker volume on EC2. Recreating the API container preserves that volume. Removing the volume deletes the orders.
-
-### GitHub settings required for AWS CD
-
-In the repository’s **Settings → Secrets and variables → Actions**, configure:
-
-| Name                 | Type     | Purpose                                      |
-| -------------------- | -------- | -------------------------------------------- |
-| `AWS_ROLE_ARN`       | Secret   | OIDC-trusted IAM role for the deployment job |
-| `AWS_REGION`         | Variable | Region containing ECR and EC2                |
-| `ECR_API_REPOSITORY` | Variable | Existing ECR repository for the API          |
-| `ECR_WEB_REPOSITORY` | Variable | Existing ECR repository for the frontend     |
-| `EC2_INSTANCE_ID`    | Variable | EC2 instance managed by SSM                  |
-
-The GitHub IAM role needs ECR image push permissions and permission to send SSM commands and retrieve their status. Restrict its OIDC trust policy to this repository’s `main` branch.
-
-The EC2 instance needs Docker, the AWS CLI, a working SSM Agent connection, and an instance role that permits SSM management and ECR image pulls. Allow inbound TCP port `8080` in the instance security group to access the app at `http://<EC2-public-address>:8080`.
-
-**CD is not ready to deploy until these AWS resources and GitHub settings exist.** The CI workflow can run without them; the production deploy job will fail if the required settings or instance are missing.
-
-## Protecting the promotion flow
-
-CI reports whether checks pass, but GitHub branch protection must be enabled separately to prevent bypassing the checks. Protect `stage` and `main`, require the `validate` status check before merging, and require pull requests for `main`. Consider requiring pull requests for `stage` as well, so feature work is reviewed before integration.
+CI reports whether checks pass, but merges can still bypass it until you turn on GitHub branch protection. Protect `main` and `stage-backend`, require pull requests, and require the `validate` status check before merging.
 
 ## Current limitations
 
-- The deployment replaces the running containers and is not a zero-downtime rollout; automatic rollback is not configured.
-- The JSON order file is suitable for this single-instance learning project, not concurrent/multi-instance production traffic.
-- The live URL uses HTTP on port `8080`; a real public service should add HTTPS and a domain.
-- Staging runs the full CI checks but is not automatically deployed to a separate staging server.
+- There's no production (live) environment or production approval gate yet. Only staging is deployed.
+- The deployment replaces the running containers, so it isn't a zero-downtime rollout, and automatic rollback isn't configured. To roll back, redeploy an earlier commit SHA.
+- Terraform state is stored locally. A shared remote backend isn't configured.
+- The instance has no Elastic IP, so its public IP (and `STAGING_PUBLIC_IP`) changes if the instance is stopped and started.
+- Staging is served over plain HTTP on port 80, with no domain or HTTPS.
+- The JSON order file suits this single-instance learning project. It can't handle concurrent or multi-instance production traffic.
